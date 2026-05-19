@@ -2,11 +2,15 @@
 
 **Open source bridge server for [Pi in Pocket](https://apps.apple.com/us/app/pi-in-pocket-agent-viewer/id6766181905), the iOS app for remotely controlling [Pi](https://pi.dev/) running on your computer.**
 
+[Download Pi in Pocket on the App Store](https://apps.apple.com/us/app/pi-in-pocket-agent-viewer/id6766181905) · [Learn about Pi](https://pi.dev/) · [Set up Tailscale](https://tailscale.com/)
+
 Pi Bridge lets your iPhone talk to your local Pi agent through a self-hosted server. Run the bridge on the same computer where you use Pi, then connect to it from Pi in Pocket over a private network such as [Tailscale](https://tailscale.com/) or a secure tunnel such as Cloudflare Tunnel.
 
 ```
 Pi in Pocket iOS app  ->  Pi Bridge  ->  Pi running on your computer
 ```
+
+Pi Bridge does not require an account with this project. You host it yourself and connect directly from your own phone.
 
 ## What is Pi Bridge?
 
@@ -76,38 +80,13 @@ Pi Bridge runs beside Pi on your computer.
 
 The iOS app talks to Pi Bridge. Pi Bridge talks to `pi --mode rpc`.
 
-## How to expose it securely
+## What you need
 
-Pi Bridge is designed to be self-hosted. You should run it on the computer where Pi is installed.
-
-For remote access from your iPhone, use a private or authenticated network layer.
-
-Recommended options:
-
-### Option 1: Tailscale
-
-Use [Tailscale](https://tailscale.com/) to put your computer and iPhone on the same private network.
-
-This is the simplest recommended setup for most users.
-
-### Option 2: Cloudflare Tunnel
-
-Use Cloudflare Tunnel if you want an HTTPS endpoint without directly opening a port on your home network.
-
-### Not recommended
-
-Do not expose Pi Bridge directly to the public internet without a secure access layer.
-
-The bridge uses bearer-token auth, but it should still be treated as a private service because it can control a Pi agent running on your computer.
-
-## Project status
-
-This project is an independent open source bridge server for Pi in Pocket users. It is designed to work with [Pi](https://pi.dev/). It is not an official Pi.dev project unless stated otherwise.
-
-## Requirements
-
-- [Bun](https://bun.sh) runtime
+- A computer running Pi
 - [Pi](https://pi.dev/) installed and available as a CLI command
+- [Bun](https://bun.sh) installed
+- Pi in Pocket installed on your iPhone
+- A private or authenticated way for your iPhone to reach your computer, recommended: Tailscale
 
 ## Quick start
 
@@ -138,6 +117,85 @@ When the server starts, it prints:
 - The port
 
 Use those values in Pi in Pocket to connect your iPhone to your computer.
+
+## Connect Pi in Pocket
+
+1. Start Pi Bridge on your computer:
+
+   ```bash
+   ./run.sh
+   ```
+
+2. Copy the bridge URL and token.
+
+   The local URL is usually:
+
+   ```text
+   http://YOUR_COMPUTER_IP:7171
+   ```
+
+   If you use Tailscale, use your computer's Tailscale IP or MagicDNS name.
+
+3. Make sure your iPhone can reach your computer:
+
+   - Same Wi-Fi network, or
+   - Tailscale on both devices, or
+   - Cloudflare Tunnel or another authenticated tunnel
+
+4. Open Pi in Pocket on your iPhone.
+
+5. Enter:
+
+   - Bridge URL
+   - Bridge token
+
+6. Tap connect.
+
+## How to expose it securely
+
+Pi Bridge is designed to be self-hosted. You should run it on the computer where Pi is installed.
+
+For remote access from your iPhone, use a private or authenticated network layer.
+
+> [!WARNING]
+> Do not expose Pi Bridge directly to the public internet without a secure access layer.
+> It can control a Pi agent running on your computer.
+> Use Tailscale, Cloudflare Access, Cloudflare Tunnel, or another private/authenticated network layer.
+
+Recommended options:
+
+### Option 1: Tailscale
+
+Use [Tailscale](https://tailscale.com/) to put your computer and iPhone on the same private network.
+
+This is the simplest recommended setup for most users.
+
+### Option 2: Cloudflare Tunnel
+
+Use Cloudflare Tunnel if you want an HTTPS endpoint without directly opening a port on your home network.
+
+For stronger protection, combine it with Cloudflare Access or another authentication layer.
+
+### Not recommended
+
+Do not expose Pi Bridge directly to the public internet without a secure access layer.
+
+The bridge uses bearer-token auth, but it should still be treated as a private service because it can control a Pi agent running on your computer.
+
+## Project status
+
+This project is an independent open source bridge server for Pi in Pocket users. It is designed to work with [Pi](https://pi.dev/). It is not an official Pi.dev project unless stated otherwise.
+
+## Relationship to Pi in Pocket
+
+Pi Bridge is open source under the MIT License.
+
+Pi in Pocket is a separate iOS app available on the App Store. The app may be distributed under separate commercial terms. The MIT license for this server does not apply to the iOS app, its branding, screenshots, icons, or App Store distribution.
+
+## Requirements
+
+- [Bun](https://bun.sh) runtime
+- [Pi](https://pi.dev/) installed and available as a CLI command
 
 ## Configuration
 
@@ -257,6 +315,65 @@ The test container:
 - Runs as an unprivileged user
 - Exposes only `127.0.0.1:${PI_BRIDGE_PUBLIC_PORT:-8181}` on the host
 - Can lock Pi to a specific provider/model for predictable testing
+
+## Troubleshooting
+
+### `PI_BRIDGE_TOKEN must be set`
+
+Use `./run.sh` instead of running `bun run index.ts` directly. The launcher creates and exports a token automatically.
+
+If you want to start the server manually, set the token yourself:
+
+```bash
+export PI_BRIDGE_TOKEN="$(openssl rand -hex 32)"
+bun run index.ts
+```
+
+### `No pi CLI found`
+
+Install Pi, make sure the `pi` command is available in your shell, or set `PI_CLI` manually:
+
+```bash
+export PI_CLI=/path/to/pi
+./run.sh
+```
+
+### Pi Bridge starts, but Pi in Pocket cannot connect
+
+Check:
+
+- The bridge is running
+- Your iPhone can reach the computer's IP, Tailscale IP, or tunnel URL
+- The URL includes the correct scheme, host, and port, for example `http://100.x.y.z:7171`
+- The token matches the one printed by `./run.sh`
+- Your firewall allows inbound connections to the bridge port
+
+### WebSocket fails or streaming does not update
+
+Make sure your network, VPN, reverse proxy, or tunnel supports WebSocket upgrades.
+
+If you use Cloudflare Tunnel, check that WebSocket support is enabled and that the tunnel forwards to the correct local port.
+
+### Sessions do not appear
+
+Pi Bridge scans Pi's local session directory:
+
+```bash
+~/.pi/agent/sessions
+```
+
+Make sure Pi has created sessions on the same computer and under the same user account that runs Pi Bridge.
+
+### Push notifications do not arrive
+
+Push notifications are optional. If APNs is not configured, the bridge will still work without remote pushes.
+
+Check:
+
+- `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, and `APNS_ENV`
+- The `.p8` key file exists and is readable by the bridge process
+- `APNS_ENV` matches your app build, usually `sandbox` for development and TestFlight, `production` for App Store builds
+- The device has granted notification permission
 
 ## Source files
 
