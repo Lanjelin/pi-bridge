@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+
+# Environment / secrets
+.env*
+!.env.test.example
+
+# APNs keys
+*.p8
+
+# Test artifacts
+test-workspace/
+
+# OS
+.DS_Store

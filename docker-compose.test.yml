@@ -1,0 +1,45 @@
+services:
+  pi-test-bridge:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+      args:
+        PI_NPM_PACKAGE: ${PI_NPM_PACKAGE:-@mariozechner/pi-coding-agent}
+    image: pi-agent-test-bridge:local
+    container_name: pi-agent-test-bridge
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:${PI_BRIDGE_PUBLIC_PORT:-8181}:7171"
+    env_file:
+      - .env.test
+    environment:
+      PI_BRIDGE_HOST: 0.0.0.0
+      PI_BRIDGE_PORT: 7171
+      PI_CLI: ${PI_CLI:-pi}
+      HOME: /sandbox
+    volumes:
+      - pi-test-home:/sandbox
+      - ${PI_TEST_WORKSPACE:-./test-workspace}:/workspace
+    working_dir: /workspace
+    command: ["bun", "run", "/app/index.ts"]
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 1g
+    cpus: 1
+    read_only: true
+    tmpfs:
+      # piagent user inside the container is uid/gid 1001. Tmpfs mounts
+      # default to root-owned 0755, which makes pi crash with EACCES when
+      # it tries to mkdir under /sandbox/.pi. Pin owner+mode so piagent
+      # can write to its session/cache/config dirs.
+      - /tmp:rw,noexec,nosuid,size=128m,mode=1777
+      - /sandbox/.cache:rw,nosuid,size=256m,uid=1001,gid=1001,mode=0700
+      - /sandbox/.config:rw,nosuid,size=32m,uid=1001,gid=1001,mode=0700
+      - /sandbox/.pi:rw,nosuid,size=512m,uid=1001,gid=1001,mode=0700
+
+volumes:
+  pi-test-home:
