@@ -25,7 +25,6 @@ It can:
 - Stream Pi events back to the iOS app in real time
 - Send prompts, steering messages, follow-ups, aborts, model changes, and other commands
 - Resume existing Pi sessions from disk
-- Optionally send push notifications when a Pi response finishes
 
 ## Who is this for?
 
@@ -43,18 +42,7 @@ Typical use cases:
 
 **No analytics. No tracking.**
 
-Pi Bridge does not collect usage analytics, telemetry, device identifiers, behavioral data, or server-side tracking data.
-
-The Pi in Pocket mobile app also has no analytics and no tracking.
-
-Your data path is controlled by you:
-
-- The bridge runs on your own computer
-- Pi sessions stay on your machine
-- Authentication uses your own bridge token
-- Remote access is handled by infrastructure you choose, such as Tailscale or Cloudflare Tunnel
-
-Important note: if you use third-party networking services, model providers, or Pi itself, those services may have their own privacy policies. Pi Bridge itself does not add tracking.
+Pi Bridge and the Pi in Pocket iOS app do not collect any data.
 
 ## How it works
 
@@ -208,39 +196,6 @@ All configuration is via environment variables.
 | `PI_BRIDGE_PORT` | No | `7171` | Port to bind |
 | `PI_BRIDGE_HOST` | No | `0.0.0.0` | Host to bind |
 
-## Optional: APNs push notifications
-
-Pi Bridge can optionally send Apple Push Notifications when a Pi response finishes.
-
-If you do not configure APNs, the bridge still works. Push notifications are simply disabled.
-
-Store APNs config in:
-
-```bash
-~/.config/pi-bridge/apns.env
-```
-
-`run.sh` will source this file automatically if it exists.
-
-| Variable | Description |
-|---|---|
-| `APNS_KEY_PATH` | Path to APNs Auth Key `.p8` file |
-| `APNS_KEY_ID` | 10-character Key ID from Apple Developer portal |
-| `APNS_TEAM_ID` | 10-character Team ID |
-| `APNS_BUNDLE_ID` | App bundle identifier, used as `apns-topic` |
-| `APNS_ENV` | `sandbox` or `production`, default is `sandbox` |
-
-## Optional: model locking for test mode
-
-For sandboxed review or testing, you can lock the bridge to one provider and model.
-
-| Variable | Description |
-|---|---|
-| `PI_FORCE_PROVIDER` | Lock all sessions to this provider |
-| `PI_FORCE_MODEL` | Lock all sessions to this model |
-
-When set, the bridge ignores client-supplied provider/model values on session creation, filters the model list down to the locked pair, and rejects model switch requests that do not match.
-
 ## API overview
 
 Pi in Pocket uses these endpoints internally. You normally do not need to call them manually, but they are documented here for transparency and for other client developers.
@@ -282,39 +237,6 @@ GET /sessions/:id/events?token=YOUR_TOKEN&sinceSeq=N
 Upgrades to WebSocket for real-time event streaming.
 
 `sinceSeq` is optional. It lets clients reconnect and receive only events newer than the last event they saw.
-
-### Push notification endpoints
-
-```http
-POST   /sessions/:id/notifications/subscribe
-DELETE /sessions/:id/notifications/subscribe
-POST   /devices/:token/active
-POST   /devices/:token/viewing
-```
-
-These are used by the iOS app to register APNs device tokens and avoid redundant banners when the app is already foregrounded on the active session.
-
-## Docker sandbox mode
-
-For App Store review or isolated testing, the bridge can run in a locked-down Docker container.
-
-```bash
-# 1. Copy and configure env
-cp .env.test.example .env.test
-
-# 2. Edit .env.test with your test values
-
-# 3. Build and run
-./run-test-container.sh
-```
-
-The test container:
-
-- Does not mount your host home directory
-- Does not mount the Docker socket
-- Runs as an unprivileged user
-- Exposes only `127.0.0.1:${PI_BRIDGE_PUBLIC_PORT:-8181}` on the host
-- Can lock Pi to a specific provider/model for predictable testing
 
 ## Troubleshooting
 
@@ -364,22 +286,11 @@ Pi Bridge scans Pi's local session directory:
 
 Make sure Pi has created sessions on the same computer and under the same user account that runs Pi Bridge.
 
-### Push notifications do not arrive
-
-Push notifications are optional. If APNs is not configured, the bridge will still work without remote pushes.
-
-Check:
-
-- `APNS_KEY_PATH`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_BUNDLE_ID`, and `APNS_ENV`
-- The `.p8` key file exists and is readable by the bridge process
-- `APNS_ENV` matches your app build, usually `sandbox` for development and TestFlight, `production` for App Store builds
-- The device has granted notification permission
-
 ## Source files
 
 | File | Description |
 |---|---|
-| `index.ts` | HTTP + WebSocket server, routing, auth, push notification logic |
+| `index.ts` | HTTP + WebSocket server, routing, and auth |
 | `manager.ts` | Session pool, event fanout, ring buffer, seq/turnId stamping, idle reaper |
 | `rpc.ts` | Spawns `pi --mode rpc`, newline-delimited JSON over stdin/stdout |
 | `sessions.ts` | Scans `~/.pi/agent/sessions/` for on-disk session files |
