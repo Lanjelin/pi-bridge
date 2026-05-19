@@ -2,7 +2,7 @@
 
 **Open source bridge server for [Pi in Pocket](https://apps.apple.com/us/app/pi-in-pocket-agent-viewer/id6766181905), the iOS app for remotely controlling [Pi](https://pi.dev/) running on your computer.**
 
-[Download Pi in Pocket on the App Store](https://apps.apple.com/us/app/pi-in-pocket-agent-viewer/id6766181905) · [Learn about Pi](https://pi.dev/) · [Set up Tailscale](https://tailscale.com/)
+[Pi in Pocket landing page](https://pi-ios.huddee.com) · [Download on the App Store](https://apps.apple.com/us/app/pi-in-pocket-agent-viewer/id6766181905) · [Learn about Pi](https://pi.dev/) · [Set up Tailscale](https://tailscale.com/)
 
 Pi Bridge lets your iPhone talk to your local Pi agent through a self-hosted server. Run the bridge on the same computer where you use Pi, then connect to it from Pi in Pocket over a private network such as [Tailscale](https://tailscale.com/) or a secure tunnel such as Cloudflare Tunnel.
 
