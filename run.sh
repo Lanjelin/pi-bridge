@@ -33,10 +33,8 @@ fi
 if [[ -z "${PI_CLI:-}" ]]; then
   if command -v pi >/dev/null 2>&1; then
     export PI_CLI="$(command -v pi)"
-  elif [[ -x "$HOME/Documents/Projects/OSS/pi-mono/pi-test.sh" ]]; then
-    export PI_CLI="$HOME/Documents/Projects/OSS/pi-mono/pi-test.sh"
   else
-    echo "No pi CLI found. Set PI_CLI=/path/to/pi or pi-test.sh" >&2
+    echo "No pi CLI found. Set PI_CLI=/path/to/pi" >&2
     exit 1
   fi
 fi
