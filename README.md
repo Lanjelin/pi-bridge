@@ -35,7 +35,6 @@ Typical use cases:
 - Start a Pi session from your desk, continue from your phone
 - Check long-running agent work while away from your computer
 - Send follow-up instructions remotely
-- Get notified when Pi finishes a response
 - Use your own machine, your own Pi setup, and your own network
 
 ## Privacy

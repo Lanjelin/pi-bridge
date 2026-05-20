@@ -1,8 +1,18 @@
 {
   "name": "pi-bridge",
   "version": "0.1.0",
+  "description": "Open source bridge server for Pi in Pocket, connecting the iOS app to Pi running on your computer.",
   "type": "module",
   "private": true,
+  "license": "MIT",
+  "homepage": "https://pi-ios.huddee.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huy-le/pi-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/huy-le/pi-bridge/issues"
+  },
   "scripts": {
     "start": "bun run index.ts",
     "dev": "bun --watch run index.ts"
