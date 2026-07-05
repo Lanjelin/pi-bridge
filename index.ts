@@ -173,6 +173,7 @@ function checkAuth(req: Request, url: URL): boolean {
 
 interface WsData {
   sessionId: string;
+  sinceSeq?: number;
   unsubscribe: () => void;
 }
 
