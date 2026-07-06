@@ -6,7 +6,8 @@
 //   PI_BRIDGE_PORT   - port to bind (default: 7171)
 //   PI_BRIDGE_HOST   - host to bind (default: "0.0.0.0")
 
-import { listSessions } from "./sessions.ts";
+import { listSessions, SESSIONS_ROOT } from "./sessions.ts";
+
 import { SessionManager } from "./manager.ts";
 import { APNs } from "./apns.ts";
 import type { AgentEvent } from "./types.ts";
@@ -47,6 +48,19 @@ const deviceActive = new Map<string, boolean>();
  * the user is actively in that exact session in the foreground.
  */
 const deviceViewing = new Map<string, string | null>();
+function formatRequestLogUrl(url: URL): string {
+  const logged = new URL(url.toString());
+  if (logged.searchParams.has("token")) {
+    logged.searchParams.set("token", "<redacted>");
+  }
+  const parts = logged.pathname.split("/");
+  if (parts[1] === "devices" && parts.length >= 3 && parts[2]) {
+    parts[2] = "<redacted>";
+    logged.pathname = parts.join("/");
+  }
+  return `${logged.pathname}${logged.search}`;
+}
+
 
 function isDeviceForegrounded(deviceToken: string): boolean {
   return deviceActive.get(deviceToken) ?? true;
@@ -162,6 +176,150 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+const MAX_JSON_BODY_BYTES = 512 * 1024;
+const MAX_TEXT_FIELD_LENGTH = 16_384;
+const MAX_NAME_LENGTH = 128;
+const MAX_DEVICE_TOKEN_LENGTH = 256;
+const MAX_IMAGES = 8;
+const MAX_IMAGE_DATA_LENGTH = 8 * 1024 * 1024;
+async function readJsonObject(req: Request, maxBytes = MAX_JSON_BODY_BYTES): Promise<Record<string, unknown> | Response> {
+  const contentLength = req.headers.get("content-length");
+  if (contentLength !== null) {
+    const parsed = Number(contentLength);
+    if (Number.isFinite(parsed) && parsed > maxBytes) {
+      return json({ error: "request body too large" }, 413);
+    }
+  }
+  const body = await req.text();
+  if (Buffer.byteLength(body, "utf8") > maxBytes) {
+    return json({ error: "request body too large" }, 413);
+  }
+  if (!body.trim()) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return json({ error: "invalid JSON" }, 400);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return json({ error: "JSON object required" }, 400);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function readBooleanField(body: Record<string, unknown>, key: string): boolean | Response {
+  const value = body[key];
+  if (typeof value !== "boolean") {
+    return json({ error: `${key} must be a boolean` }, 400);
+  }
+  return value;
+}
+
+function readStringField(
+  body: Record<string, unknown>,
+  key: string,
+  opts: { required?: boolean; maxLength?: number; allowEmpty?: boolean } = {},
+): string | undefined | Response {
+  const value = body[key];
+  if (value === undefined || value === null) {
+    return opts.required ? json({ error: `${key} is required` }, 400) : undefined;
+  }
+  if (typeof value !== "string") {
+    return json({ error: `${key} must be a string` }, 400);
+  }
+  if (!opts.allowEmpty && value.length === 0 && opts.required) {
+    return json({ error: `${key} cannot be empty` }, 400);
+  }
+  if (opts.maxLength !== undefined && value.length > opts.maxLength) {
+    return json({ error: `${key} is too long` }, 413);
+  }
+  return value;
+}
+
+function validateImages(input: unknown): Array<{ type: "image"; data: string; mimeType: string }> | Response {
+  if (input === undefined || input === null) return [];
+  if (!Array.isArray(input)) {
+    return json({ error: "images must be an array" }, 400);
+  }
+  if (input.length > MAX_IMAGES) {
+    return json({ error: `at most ${MAX_IMAGES} images allowed` }, 400);
+  }
+  const out: Array<{ type: "image"; data: string; mimeType: string }> = [];
+  for (const raw of input) {
+    if (!raw || typeof raw !== "object") {
+      return json({ error: "each image must be an object" }, 400);
+    }
+    const r = raw as Record<string, unknown>;
+    const data = typeof r.data === "string" ? r.data : undefined;
+    const mimeType = typeof r.mimeType === "string"
+      ? r.mimeType
+      : typeof r.media_type === "string"
+        ? r.media_type
+        : undefined;
+    if (!data || !mimeType) {
+      return json({ error: "each image requires data and mimeType" }, 400);
+    }
+    if (data.length > MAX_IMAGE_DATA_LENGTH) {
+      return json({ error: "image payload too large" }, 413);
+    }
+    out.push({ type: "image", data, mimeType });
+  }
+  return out;
+}
+
+function requireOptionalSessionId(
+  body: Record<string, unknown>,
+  key: string,
+): string | null | Response {
+  const value = body[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string") {
+    return json({ error: `${key} must be a string or null` }, 400);
+  }
+  return value.length > 0 ? value : null;
+}
+function requireDeviceToken(body: Record<string, unknown>): string | Response {
+  const value = readStringField(body, "deviceToken", { required: true, maxLength: MAX_DEVICE_TOKEN_LENGTH, allowEmpty: false });
+  if (typeof value !== "string") {
+    return value instanceof Response ? value : json({ error: "deviceToken is required" }, 400);
+  }
+  return value;
+}
+
+function requireModelLockField(
+  body: Record<string, unknown>,
+  key: "provider" | "modelId",
+): string | Response {
+  const value = readStringField(body, key, { required: true, maxLength: MAX_TEXT_FIELD_LENGTH, allowEmpty: false });
+  if (typeof value !== "string") {
+    return value instanceof Response ? value : json({ error: `${key} is required` }, 400);
+  }
+  return value;
+}
+
+function requireTextField(
+  body: Record<string, unknown>,
+  key: string,
+  maxLength: number,
+  required = false,
+): string | undefined | Response {
+  const value = readStringField(body, key, { required, maxLength, allowEmpty: true });
+  if (required) {
+    if (typeof value === "string") return value;
+    return value instanceof Response ? value : json({ error: `${key} is required` }, 400);
+  }
+  return value;
+}
+
+function requireNameField(body: Record<string, unknown>): string | Response {
+  const value = readStringField(body, "name", { required: true, maxLength: MAX_NAME_LENGTH, allowEmpty: true });
+  if (typeof value !== "string") {
+    return value instanceof Response ? value : json({ error: "name is required" }, 400);
+  }
+  return value;
+}
+
+
 function checkAuth(req: Request, url: URL): boolean {
   const header = req.headers.get("authorization");
   if (header === `Bearer ${TOKEN}`) return true;
@@ -170,6 +328,17 @@ function checkAuth(req: Request, url: URL): boolean {
   if (q && q === TOKEN) return true;
   return false;
 }
+
+function buildHealthSnapshot(): Record<string, unknown> {
+  return {
+    ok: true,
+    cli: CLI,
+    sessions: manager.list().length,
+    sessionsRoot: SESSIONS_ROOT,
+    apnsConfigured: !!apns,
+  };
+}
+
 
 interface WsData {
   sessionId: string;
@@ -184,12 +353,13 @@ const server = Bun.serve<WsData>({
   async fetch(req, srv) {
     const url = new URL(req.url);
     const reqId = Math.random().toString(36).slice(2, 8);
-    console.log(`[http #${reqId}] ${req.method} ${url.pathname}${url.search}`);
+    console.log(`[http #${reqId}] ${req.method} ${formatRequestLogUrl(url)}`);
 
     // Public: health check (lets the iOS Settings screen verify reachability
     // before a token is entered).
     if (url.pathname === "/health") {
-      return json({ ok: true, cli: CLI, sessions: manager.list().length });
+      return json(buildHealthSnapshot());
+
     }
 
     if (!checkAuth(req, url)) {
@@ -277,6 +447,8 @@ const server = Bun.serve<WsData>({
 
 console.log(`pi-bridge listening on http://${HOST}:${PORT}`);
 console.log(`  PI_CLI=${CLI}`);
+console.log(`  sessionsRoot=${SESSIONS_ROOT}`);
+console.log(`  apnsConfigured=${apns ? "yes" : "no"}`);
 console.log(`  auth: Bearer ${TOKEN.slice(0, 4)}…${TOKEN.slice(-4)}`);
 
 async function route(req: Request, url: URL): Promise<Response> {
@@ -284,7 +456,8 @@ async function route(req: Request, url: URL): Promise<Response> {
   const method = req.method;
 
   if (path === "/health") {
-    return json({ ok: true, cli: CLI, sessions: manager.list().length });
+    return json(buildHealthSnapshot());
+
   }
 
   // Sessions
@@ -300,28 +473,40 @@ async function route(req: Request, url: URL): Promise<Response> {
   const devActiveMatch = path.match(/^\/devices\/([^/]+)\/active$/);
   if (devActiveMatch && method === "POST") {
     const deviceToken = devActiveMatch[1]!;
-    const body = await req.json().catch(() => ({}));
-    setDeviceActive(deviceToken, Boolean(body.active));
-    return json({ ok: true, active: Boolean(body.active) });
+    const bodyOrResponse = await readJsonObject(req);
+    if (bodyOrResponse instanceof Response) return bodyOrResponse;
+    const active = readBooleanField(bodyOrResponse, "active");
+    if (active instanceof Response) return active;
+    setDeviceActive(deviceToken, active);
+    return json({ ok: true, active });
   }
 
   const devViewingMatch = path.match(/^\/devices\/([^/]+)\/viewing$/);
   if (devViewingMatch && method === "POST") {
     const deviceToken = devViewingMatch[1]!;
-    const body = await req.json().catch(() => ({}));
-    const sessionId = typeof body.sessionId === "string" && body.sessionId.length > 0
-      ? body.sessionId
-      : null;
+    const bodyOrResponse = await readJsonObject(req);
+    if (bodyOrResponse instanceof Response) return bodyOrResponse;
+    const sessionId = requireOptionalSessionId(bodyOrResponse, "sessionId");
+    if (sessionId instanceof Response) return sessionId;
     setDeviceViewing(deviceToken, sessionId);
     return json({ ok: true, sessionId });
   }
 
   if (path === "/sessions" && method === "POST") {
-    const body = await req.json().catch(() => ({}));
-    const cwd = String(body.cwd ?? process.cwd());
-    const model = body.model ? String(body.model) : undefined;
-    const provider = body.provider ? String(body.provider) : undefined;
-    const resumeSessionPath = body.resumeSessionPath ? String(body.resumeSessionPath) : undefined;
+    const bodyOrResponse = await readJsonObject(req);
+    if (bodyOrResponse instanceof Response) return bodyOrResponse;
+    const cwdRaw = readStringField(bodyOrResponse, "cwd", { required: false, maxLength: 4096, allowEmpty: true });
+    if (cwdRaw instanceof Response) return cwdRaw;
+    const modelRaw = readStringField(bodyOrResponse, "model", { required: false, maxLength: MAX_TEXT_FIELD_LENGTH, allowEmpty: true });
+    if (modelRaw instanceof Response) return modelRaw;
+    const providerRaw = readStringField(bodyOrResponse, "provider", { required: false, maxLength: MAX_TEXT_FIELD_LENGTH, allowEmpty: true });
+    if (providerRaw instanceof Response) return providerRaw;
+    const resumeRaw = readStringField(bodyOrResponse, "resumeSessionPath", { required: false, maxLength: 4096, allowEmpty: true });
+    if (resumeRaw instanceof Response) return resumeRaw;
+    const cwd = typeof cwdRaw === "string" && cwdRaw.length > 0 ? cwdRaw : process.cwd();
+    const model = typeof modelRaw === "string" && modelRaw.length > 0 ? modelRaw : undefined;
+    const provider = typeof providerRaw === "string" && providerRaw.length > 0 ? providerRaw : undefined;
+    const resumeSessionPath = typeof resumeRaw === "string" && resumeRaw.length > 0 ? resumeRaw : undefined;
     const s = await manager.create({ cwd, model, provider, resumeSessionPath });
     // Fetch initial state so the client has something to render.
     let state: unknown = null;
@@ -388,25 +573,45 @@ async function route(req: Request, url: URL): Promise<Response> {
     }
 
     if (sub === "prompt" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const message = String(body.message ?? "");
-      const images = sanitizeImages(body.images);
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const messageRaw = requireTextField(bodyOrResponse, "message", MAX_TEXT_FIELD_LENGTH);
+      if (messageRaw instanceof Response) return messageRaw;
+      const images = validateImages(bodyOrResponse.images);
+      if (images instanceof Response) return images;
+      const message = typeof messageRaw === "string" ? messageRaw : "";
       if (!message && images.length === 0) return json({ error: "message or images required" }, 400);
       const r = await session.rpc.send({ type: "prompt", message, images });
       return json(r);
     }
 
     if (sub === "steer" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const images = sanitizeImages(body.images);
-      const r = await session.rpc.send({ type: "steer", message: String(body.message ?? ""), images });
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const messageRaw = requireTextField(bodyOrResponse, "message", MAX_TEXT_FIELD_LENGTH);
+      if (messageRaw instanceof Response) return messageRaw;
+      const images = validateImages(bodyOrResponse.images);
+      if (images instanceof Response) return images;
+      const r = await session.rpc.send({
+        type: "steer",
+        message: typeof messageRaw === "string" ? messageRaw : "",
+        images,
+      });
       return json(r);
     }
 
     if (sub === "follow_up" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const images = sanitizeImages(body.images);
-      const r = await session.rpc.send({ type: "follow_up", message: String(body.message ?? ""), images });
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const messageRaw = requireTextField(bodyOrResponse, "message", MAX_TEXT_FIELD_LENGTH);
+      if (messageRaw instanceof Response) return messageRaw;
+      const images = validateImages(bodyOrResponse.images);
+      if (images instanceof Response) return images;
+      const r = await session.rpc.send({
+        type: "follow_up",
+        message: typeof messageRaw === "string" ? messageRaw : "",
+        images,
+      });
       return json(r);
     }
 
@@ -416,18 +621,21 @@ async function route(req: Request, url: URL): Promise<Response> {
     }
 
     if (sub === "model" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
       const fp = process.env.PI_FORCE_PROVIDER?.trim();
       const fm = process.env.PI_FORCE_MODEL?.trim();
+      const provider = requireModelLockField(bodyOrResponse, "provider");
+      if (provider instanceof Response) return provider;
+      const modelId = requireModelLockField(bodyOrResponse, "modelId");
+      if (modelId instanceof Response) return modelId;
       // Test-container override: refuse model switches that don't match
       // the locked provider/model. We don't silently rewrite the call
       // because that would let the client think the switch succeeded.
-      if ((fp || fm)) {
-        const reqProvider = String(body.provider ?? "");
-        const reqModel = String(body.modelId ?? "");
-        const ok = (!fp || reqProvider === fp) && (!fm || reqModel === fm);
+      if (fp || fm) {
+        const ok = (!fp || provider === fp) && (!fm || modelId === fm);
         if (!ok) {
-          console.log(`[forced-models] reject set_model provider=${reqProvider} modelId=${reqModel} (locked to ${fp ?? "*"}/${fm ?? "*"})`);
+          console.log(`[forced-models] reject set_model provider=${provider} modelId=${modelId} (locked to ${fp ?? "*"}/${fm ?? "*"})`);
           return json({
             success: false,
             error: `model is locked to ${fp ?? "*"}/${fm ?? "*"} on this bridge`,
@@ -437,15 +645,18 @@ async function route(req: Request, url: URL): Promise<Response> {
       }
       const r = await session.rpc.send({
         type: "set_model",
-        provider: String(body.provider),
-        modelId: String(body.modelId),
+        provider,
+        modelId,
       });
       return json(r);
     }
 
     if (sub === "thinking" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const level = String(body.level ?? "").trim().toLowerCase();
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const levelRaw = requireTextField(bodyOrResponse, "level", 16, true);
+      if (typeof levelRaw !== "string") return levelRaw ?? json({ error: "level is required" }, 400);
+      const level = levelRaw.trim().toLowerCase();
       const allowed = ["off", "minimal", "low", "medium", "high", "xhigh"];
       if (!allowed.includes(level)) {
         return json({ error: `level must be one of ${allowed.join(", ")}` }, 400);
@@ -455,39 +666,51 @@ async function route(req: Request, url: URL): Promise<Response> {
     }
 
     if (sub === "compact" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const customInstructions = body.customInstructions ? String(body.customInstructions) : undefined;
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const customInstructionsRaw = requireTextField(bodyOrResponse, "customInstructions", MAX_TEXT_FIELD_LENGTH);
+      if (customInstructionsRaw instanceof Response) return customInstructionsRaw;
+      const customInstructions = typeof customInstructionsRaw === "string" && customInstructionsRaw.length > 0
+        ? customInstructionsRaw
+        : undefined;
       const r = await session.rpc.send({ type: "compact", customInstructions });
       return json(r);
     }
 
     if (sub === "keep-alive" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const enabled = Boolean(body.enabled);
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const enabled = readBooleanField(bodyOrResponse, "enabled");
+      if (enabled instanceof Response) return enabled;
       const ok = manager.setKeepAlive(id, enabled);
       if (!ok) return json({ error: "session not found" }, 404);
       return json({ ok: true, keepAlive: enabled });
     }
 
     if (sub === "notifications/subscribe" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const deviceToken = String(body.deviceToken ?? "").trim();
-      if (!deviceToken) return json({ error: "deviceToken required" }, 400);
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const deviceToken = requireDeviceToken(bodyOrResponse);
+      if (deviceToken instanceof Response) return deviceToken;
       subscribePush(id, deviceToken);
       return json({ ok: true, apnsConfigured: !!apns });
     }
 
     if (sub === "notifications/subscribe" && method === "DELETE") {
-      const body = await req.json().catch(() => ({}));
-      const deviceToken = String(body.deviceToken ?? "").trim();
-      if (!deviceToken) return json({ error: "deviceToken required" }, 400);
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const deviceToken = requireDeviceToken(bodyOrResponse);
+      if (deviceToken instanceof Response) return deviceToken;
       unsubscribePush(id, deviceToken);
       return json({ ok: true });
     }
 
     if (sub === "name" && method === "POST") {
-      const body = await req.json().catch(() => ({}));
-      const r = await session.rpc.send({ type: "set_session_name", name: String(body.name ?? "") });
+      const bodyOrResponse = await readJsonObject(req);
+      if (bodyOrResponse instanceof Response) return bodyOrResponse;
+      const name = requireNameField(bodyOrResponse);
+      if (name instanceof Response) return name;
+      const r = await session.rpc.send({ type: "set_session_name", name });
       return json(r);
     }
   }
@@ -495,25 +718,4 @@ async function route(req: Request, url: URL): Promise<Response> {
   return json({ error: "not found", path }, 404);
 }
 
-/**
- * Coerce client-supplied image attachments into the shape pi-ai expects:
- * `{ type: "image", data: base64, mimeType: string }`. Drops anything
- * that doesn't have both `data` and `mimeType`. Accepts either the full
- * shape or the bare `{ data, mimeType }` form so the iOS client can stay
- * simple.
- */
-function sanitizeImages(input: unknown): Array<{ type: "image"; data: string; mimeType: string }> {
-  if (!Array.isArray(input)) return [];
-  const out: Array<{ type: "image"; data: string; mimeType: string }> = [];
-  for (const raw of input) {
-    if (!raw || typeof raw !== "object") continue;
-    const r = raw as Record<string, unknown>;
-    const data = typeof r.data === "string" ? r.data : undefined;
-    const mimeType = typeof r.mimeType === "string" ? r.mimeType
-      : typeof r.media_type === "string" ? r.media_type
-      : undefined;
-    if (!data || !mimeType) continue;
-    out.push({ type: "image", data, mimeType });
-  }
-  return out;
-}
+
