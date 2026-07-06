@@ -101,6 +101,8 @@ test("health is public and exposes bridge status", async () => {
   expect(body).toMatchObject({
     ok: true,
     cli: "pi",
+    version: "0.1.0",
+    buildSha: null,
     sessions: 0,
     sessionsRoot: bridge.root,
     apnsConfigured: false,

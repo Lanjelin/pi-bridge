@@ -102,10 +102,13 @@ export class SessionManager {
    *  by the bridge to fire APNs pushes on `agent_end` regardless of
    *  whether any iOS clients have an active WebSocket. */
   private globalListeners = new Set<(e: AgentEvent, session: ManagedSession) => void>();
+  private idleTimer: NodeJS.Timeout;
 
   constructor(private cliPath: string) {
-    setInterval(() => this.reapIdle(), 60_000);
+    this.idleTimer = setInterval(() => this.reapIdle(), 60_000);
+    this.idleTimer.unref?.();
   }
+
 
   /**
    * Register a callback that fires for every event from every session.
@@ -116,6 +119,13 @@ export class SessionManager {
     this.globalListeners.add(fn);
     return () => this.globalListeners.delete(fn);
   }
+
+  async shutdown(): Promise<void> {
+    clearInterval(this.idleTimer);
+    const sessionIds = [...this.sessions.keys()];
+    await Promise.all(sessionIds.map((id) => this.destroy(id).catch(() => {})));
+  }
+
 
   list(): Array<{
     id: string;
@@ -206,8 +216,9 @@ export class SessionManager {
       for (const listener of this.globalListeners) {
         try {
           listener(stamped, session);
-        } catch (err: any) {
-          console.error("[manager] global listener error:", err?.message ?? err);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error("[manager] global listener error:", message);
         }
       }
     };
@@ -224,13 +235,15 @@ export class SessionManager {
       this.sessions.delete(id);
     };
 
+
     rpc.onEvent((e) => {
       session.lastActivity = Date.now();
       fanout(e);
     });
 
     await rpc.start();
-    console.log(`[manager] pi rpc spawned for session ${id} pid=${(rpc as any).proc?.pid}`);
+    console.log(`[manager] pi rpc spawned for session ${id} pid=${rpc.pid ?? "?"}`);
+
 
     if (opts.resumeSessionPath) {
       const resp = await rpc.send({ type: "switch_session", sessionPath: opts.resumeSessionPath });

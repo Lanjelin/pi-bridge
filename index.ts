@@ -17,9 +17,13 @@ if (!TOKEN) {
   console.error("PI_BRIDGE_TOKEN must be set");
   process.exit(1);
 }
+const APP_VERSION = "0.1.0";
+const BUILD_SHA = process.env.PI_BRIDGE_SHA ?? null;
 const CLI = process.env.PI_CLI ?? "pi";
+
 const PORT = Number(process.env.PI_BRIDGE_PORT ?? 7171);
 const HOST = process.env.PI_BRIDGE_HOST ?? "0.0.0.0";
+
 
 const manager = new SessionManager(CLI);
 const apns = APNs.fromEnv();
@@ -143,24 +147,30 @@ if (apns) {
  * generic message when no text is found (e.g. tool-only turn).
  */
 function extractAssistantTail(event: AgentEvent): string | undefined {
-  const messages = (event as any).messages;
+  const record = event as Record<string, unknown>;
+  const messages = record.messages;
   if (!Array.isArray(messages)) return undefined;
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
-    if (!m || m.role !== "assistant") continue;
-    const content = m.content;
+    if (!m || typeof m !== "object") continue;
+    const message = m as Record<string, unknown>;
+    if (message.role !== "assistant") continue;
+    const content = message.content;
     if (typeof content === "string" && content.trim()) return content.trim().slice(0, 240);
     if (Array.isArray(content)) {
       for (let j = content.length - 1; j >= 0; j--) {
         const part = content[j];
-        if (part && part.type === "text" && typeof part.text === "string" && part.text.trim()) {
-          return part.text.trim().slice(0, 240);
+        if (!part || typeof part !== "object") continue;
+        const recordPart = part as Record<string, unknown>;
+        if (recordPart.type === "text" && typeof recordPart.text === "string" && recordPart.text.trim()) {
+          return recordPart.text.trim().slice(0, 240);
         }
       }
     }
   }
   return undefined;
 }
+
 
 function unauthorized(): Response {
   return new Response(JSON.stringify({ error: "unauthorized" }), {
@@ -333,11 +343,14 @@ function buildHealthSnapshot(): Record<string, unknown> {
   return {
     ok: true,
     cli: CLI,
+    version: APP_VERSION,
+    buildSha: BUILD_SHA,
     sessions: manager.list().length,
     sessionsRoot: SESSIONS_ROOT,
     apnsConfigured: !!apns,
   };
 }
+
 
 
 interface WsData {
@@ -359,7 +372,6 @@ const server = Bun.serve<WsData>({
     // before a token is entered).
     if (url.pathname === "/health") {
       return json(buildHealthSnapshot());
-
     }
 
     if (!checkAuth(req, url)) {
@@ -390,11 +402,13 @@ const server = Bun.serve<WsData>({
       const res = await route(req, url);
       console.log(`[http #${reqId}] -> ${res.status}`);
       return res;
-    } catch (err: any) {
-      console.error(`[http #${reqId}] route error:`, err?.message ?? err);
-      return json({ error: String(err?.message ?? err) }, 500);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[http #${reqId}] route error:`, message);
+      return json({ error: message }, 500);
     }
   },
+
   websocket: {
     open(ws) {
       const session = manager.get(ws.data.sessionId);
@@ -410,28 +424,42 @@ const server = Bun.serve<WsData>({
       const sinceSeq = ws.data.sinceSeq;
       const buffer = session.recentEvents;
       const oldestSeq = buffer.length > 0 ? (buffer[0] as AgentEvent).seq ?? 0 : 0;
-      if (sinceSeq !== undefined && buffer.length > 0 && oldestSeq > sinceSeq + 1) {
+      let fn: ((e: AgentEvent) => void) | undefined;
+      const sendOrCleanup = (payload: string): boolean => {
         try {
-          ws.send(JSON.stringify({
-            type: "resync_required",
-            sinceSeq,
-            oldestSeq,
-            reason: "ring buffer gap",
-          }));
-        } catch {}
+          ws.send(payload);
+          return true;
+        } catch {
+          if (fn) session.subscribers.delete(fn);
+          try {
+            ws.close(1011, "send failed");
+          } catch {}
+          return false;
+        }
+      };
+      if (sinceSeq !== undefined && buffer.length > 0 && oldestSeq > sinceSeq + 1) {
+        if (!sendOrCleanup(JSON.stringify({
+          type: "resync_required",
+          sinceSeq,
+          oldestSeq,
+          reason: "ring buffer gap",
+        }))) {
+          return;
+        }
       }
       for (const e of buffer) {
         if (sinceSeq !== undefined && (e.seq ?? 0) <= sinceSeq) continue;
-        ws.send(JSON.stringify(e));
+        if (!sendOrCleanup(JSON.stringify(e))) return;
       }
-      const fn = (e: AgentEvent) => {
-        try {
-          ws.send(JSON.stringify(e));
-        } catch {}
+      fn = (e: AgentEvent) => {
+        if (!sendOrCleanup(JSON.stringify(e))) {
+          if (fn) session.subscribers.delete(fn);
+        }
       };
       session.subscribers.add(fn);
-      ws.data.unsubscribe = () => session.subscribers.delete(fn);
+      ws.data.unsubscribe = () => session.subscribers.delete(fn!);
     },
+
     message(ws, msg) {
       // Currently no inbound WS messages; prompts go via HTTP POST.
       // Echo a heartbeat if client pings.
@@ -446,10 +474,28 @@ const server = Bun.serve<WsData>({
 });
 
 console.log(`pi-bridge listening on http://${HOST}:${PORT}`);
+console.log(`  version=${APP_VERSION} buildSha=${BUILD_SHA ?? "(none)"}`);
 console.log(`  PI_CLI=${CLI}`);
 console.log(`  sessionsRoot=${SESSIONS_ROOT}`);
 console.log(`  apnsConfigured=${apns ? "yes" : "no"}`);
 console.log(`  auth: Bearer ${TOKEN.slice(0, 4)}…${TOKEN.slice(-4)}`);
+
+let shuttingDown = false;
+async function shutdown(reason: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[shutdown] ${reason}`);
+  try {
+    await manager.shutdown();
+  } finally {
+    apns?.close();
+    server.stop();
+  }
+}
+
+process.once("SIGINT", () => { void shutdown("SIGINT"); });
+process.once("SIGTERM", () => { void shutdown("SIGTERM"); });
+
 
 async function route(req: Request, url: URL): Promise<Response> {
   const path = url.pathname;

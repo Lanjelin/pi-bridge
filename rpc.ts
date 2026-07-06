@@ -53,7 +53,6 @@ export class PiRpc {
     this.proc.stderr.on("data", (chunk: string) => {
       this.stderr += chunk;
       if (this.stderr.length > 64_000) this.stderr = this.stderr.slice(-32_000);
-      // Log each stderr line immediately
       for (const line of chunk.split("\n")) {
         if (line.trim()) console.log(`[${this.tag}] STDERR: ${line}`);
       }
@@ -68,15 +67,17 @@ export class PiRpc {
       this.pending.clear();
       this.onClose?.(code);
     });
-    this.proc.on("error", (err) => {
-      console.log(`[${this.tag}] PROC ERROR: ${err.message}`);
+    this.proc.on("error", (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(`[${this.tag}] PROC ERROR: ${message}`);
       this.closed = true;
-      for (const { reject } of this.pending.values()) reject(err);
+      for (const { reject } of this.pending.values()) reject(err instanceof Error ? err : new Error(message));
       this.pending.clear();
       this.onClose?.(null);
     });
-    this.proc.stdin.on("error", (err) => {
-      console.log(`[${this.tag}] STDIN ERROR: ${err.message}`);
+    this.proc.stdin.on("error", (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(`[${this.tag}] STDIN ERROR: ${message}`);
     });
   }
 
@@ -94,33 +95,42 @@ export class PiRpc {
 
   private handleLine(line: string) {
     console.log(`[${this.tag}] STDOUT<< ${line.slice(0, 300)}${line.length > 300 ? "…" : ""}`);
-    let msg: any;
+    let msg: unknown;
     try {
-      msg = JSON.parse(line);
+      msg = JSON.parse(line) as unknown;
     } catch {
       console.log(`[${this.tag}] non-JSON stdout line ignored`);
       return;
     }
-    if (msg && msg.type === "response") {
-      const id = msg.id as string | undefined;
-      if (id && this.pending.has(id)) {
-        const p = this.pending.get(id)!;
-        this.pending.delete(id);
-        p.resolve(msg as RpcResponse);
-      } else {
-        console.log(`[${this.tag}] response without matching id (id=${id}, pending=[${[...this.pending.keys()].join(",")}])`);
-        // Fallback: if only one pending, resolve it
-        if (this.pending.size === 1) {
-          const [onlyId] = [...this.pending.keys()];
-          const p = this.pending.get(onlyId!)!;
-          this.pending.delete(onlyId!);
-          console.log(`[${this.tag}] fallback-resolving single pending id=${onlyId}`);
-          p.resolve(msg as RpcResponse);
+    if (msg && typeof msg === "object") {
+      const record = msg as Record<string, unknown>;
+      if (record.type === "response") {
+        const response: RpcResponse = {
+          id: typeof record.id === "string" ? record.id : undefined,
+          type: "response",
+          command: typeof record.command === "string" ? record.command : "",
+          success: typeof record.success === "boolean" ? record.success : false,
+          data: record.data,
+          error: typeof record.error === "string" ? record.error : undefined,
+        };
+        if (response.id && this.pending.has(response.id)) {
+          const p = this.pending.get(response.id)!;
+          this.pending.delete(response.id);
+          p.resolve(response);
+        } else {
+          console.log(`[${this.tag}] response without matching id (id=${response.id}, pending=[${[...this.pending.keys()].join(",")}])`);
+          if (this.pending.size === 1) {
+            const [onlyId] = [...this.pending.keys()];
+            const p = this.pending.get(onlyId!)!;
+            this.pending.delete(onlyId!);
+            console.log(`[${this.tag}] fallback-resolving single pending id=${onlyId}`);
+            p.resolve(response);
+          }
         }
+        return;
       }
-      return;
     }
-    // Everything else is an AgentEvent (or extension UI request).
+
     for (const l of this.eventListeners) {
       try {
         l(msg as AgentEvent);
@@ -138,8 +148,8 @@ export class PiRpc {
       console.log(`[${this.tag}] send FAILED — closed=${this.closed} proc=${!!this.proc} cmd=${cmd.type}`);
       throw new Error("rpc closed");
     }
-    const id = (cmd as any).id ?? randomUUID();
-    const withId = { ...cmd, id } as RpcCommand;
+    const id = cmd.id ?? randomUUID();
+    const withId = { ...cmd, id } satisfies RpcCommand;
     const payload = JSON.stringify(withId);
     console.log(`[${this.tag}] STDIN>> ${payload.slice(0, 300)}${payload.length > 300 ? "…" : ""}`);
     return new Promise<RpcResponse>((resolve, reject) => {
@@ -151,7 +161,6 @@ export class PiRpc {
           reject(err);
         }
       });
-      // Safety timeout so we don't hang forever
       setTimeout(() => {
         if (this.pending.has(id)) {
           console.log(`[${this.tag}] send TIMEOUT id=${id} cmd=${cmd.type}`);
@@ -176,6 +185,10 @@ export class PiRpc {
 
   get isAlive(): boolean {
     return !this.closed && this.proc !== null;
+  }
+
+  get pid(): number | undefined {
+    return this.proc?.pid;
   }
 
   get stderrTail(): string {
