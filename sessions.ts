@@ -20,6 +20,9 @@ export const SESSIONS_ROOT = (() => {
   return configured;
 })();
 
+const sessionSummaryCache = new Map<string, { mtime: number; summary: SessionSummary }>();
+
+
 export function decodeCwd(encoded: string): string {
   return encoded.replace(/-/g, "/");
 }
@@ -161,10 +164,10 @@ async function readSessionMeta(path: string): Promise<SessionMeta | null> {
   }
 }
 
-export async function listSessions(): Promise<SessionSummary[]> {
+export async function listSessions(root = SESSIONS_ROOT): Promise<SessionSummary[]> {
   let dirs: string[] = [];
   try {
-    dirs = await readdir(SESSIONS_ROOT);
+    dirs = await readdir(root);
   } catch {
     return [];
   }
@@ -172,7 +175,7 @@ export async function listSessions(): Promise<SessionSummary[]> {
   const out: SessionSummary[] = [];
 
   for (const dir of dirs) {
-    const cwdDir = join(SESSIONS_ROOT, dir);
+    const cwdDir = join(root, dir);
     let files: string[] = [];
     try {
       files = await readdir(cwdDir);
@@ -192,10 +195,16 @@ export async function listSessions(): Promise<SessionSummary[]> {
         continue;
       }
 
+      const cached = sessionSummaryCache.get(full);
+      if (cached && cached.mtime === mtime) {
+        out.push(cached.summary);
+        continue;
+      }
+
       const meta = await readSessionMeta(full);
       if (!meta) continue;
 
-      out.push({
+      const summary: SessionSummary = {
         sessionId: meta.id,
         cwd: meta.cwd || decodeCwd(dir),
         sessionPath: full,
@@ -205,7 +214,9 @@ export async function listSessions(): Promise<SessionSummary[]> {
         messageCount: meta.messageCount,
         lastUserText: meta.lastUserText,
         lastMessageText: meta.lastMessageText,
-      });
+      };
+      sessionSummaryCache.set(full, { mtime, summary });
+      out.push(summary);
     }
   }
 
