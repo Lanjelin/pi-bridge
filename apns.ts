@@ -30,7 +30,20 @@ export interface SendResult {
   status: number;
   reason?: string;
   apnsId?: string;
+  retryAfterMs?: number;
 }
+
+export function parseRetryAfterHeader(header: string | null | undefined, now = Date.now()): number | undefined {
+  if (!header) return undefined;
+  const seconds = Number(header);
+  if (Number.isFinite(seconds)) {
+    return Math.max(0, Math.round(seconds * 1000));
+  }
+  const when = Date.parse(header);
+  if (Number.isNaN(when)) return undefined;
+  return Math.max(0, when - now);
+}
+
 
 const TOKEN_REFRESH_MS = 45 * 60 * 1000; // APNs accepts tokens up to 60 min old
 
@@ -64,8 +77,9 @@ export class APNs {
     let pem: string;
     try {
       pem = readFileSync(keyPath, "utf8");
-    } catch (err: any) {
-      console.error(`[apns] failed to read key file ${keyPath}:`, err?.message ?? err);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[apns] failed to read key file ${keyPath}:`, message);
       return undefined;
     }
 
@@ -92,12 +106,20 @@ export class APNs {
 
       const retryable =
         result.status === 0 ||
+        result.status === 429 ||
         result.status >= 500 ||
         result.status === 401 ||
         result.reason === "ExpiredProviderToken" ||
         result.reason === "InvalidProviderToken";
       if (!retryable || attempt === 1) {
         return result;
+      }
+
+      const retryDelayMs = result.retryAfterMs ?? (result.status === 429 ? 1_000 : undefined);
+      if (typeof retryDelayMs === "number" && retryDelayMs > 0) {
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, Math.min(retryDelayMs, 30_000));
+        await promise;
       }
 
       if (
@@ -128,6 +150,10 @@ export class APNs {
     return results;
   }
 
+  close(): void {
+    this.resetSession();
+  }
+
   private sendOnce(session: ClientHttp2Session, deviceToken: string, payload: APNsPayload, jwt: string): Promise<SendResult> {
     const aps: Record<string, unknown> = {
       alert: { title: payload.title, body: payload.body },
@@ -140,44 +166,53 @@ export class APNs {
       ...(payload.custom ?? {}),
     });
 
-    return new Promise<SendResult>((resolve) => {
-      const req = session.request({
-        ":method": "POST",
-        ":path": `/3/device/${deviceToken}`,
-        "authorization": `bearer ${jwt}`,
-        "apns-topic": this.bundleId,
-        "apns-push-type": "alert",
-        "apns-priority": "10",
-        "apns-expiration": "0",
-        "content-type": "application/json",
-        "content-length": Buffer.byteLength(body).toString(),
-      });
-
-      let status = 0;
-      let apnsId: string | undefined;
-      let respBody = "";
-
-      req.on("response", (headers) => {
-        status = Number(headers[":status"]) || 0;
-        const id = headers["apns-id"];
-        if (typeof id === "string") apnsId = id;
-      });
-      req.setEncoding("utf8");
-      req.on("data", (chunk) => { respBody += chunk; });
-      req.on("end", () => {
-        let reason: string | undefined;
-        if (respBody) {
-          try { reason = JSON.parse(respBody).reason; } catch {}
-        }
-        resolve({ ok: status >= 200 && status < 300, status, reason, apnsId });
-      });
-      req.on("error", (err) => {
-        console.error("[apns] request error:", err.message);
-        resolve({ ok: false, status: 0, reason: err.message });
-      });
-
-      req.end(body);
+    const { promise, resolve } = Promise.withResolvers<SendResult>();
+    const req = session.request({
+      ":method": "POST",
+      ":path": `/3/device/${deviceToken}`,
+      "authorization": `bearer ${jwt}`,
+      "apns-topic": this.bundleId,
+      "apns-push-type": "alert",
+      "apns-priority": "10",
+      "apns-expiration": "0",
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body).toString(),
     });
+
+    let status = 0;
+    let apnsId: string | undefined;
+    let retryAfterMs: number | undefined;
+    let respBody = "";
+
+    req.on("response", (headers) => {
+      status = Number(headers[":status"]) || 0;
+      const id = headers["apns-id"];
+      if (typeof id === "string") apnsId = id;
+      const retryAfter = headers["retry-after"];
+      if (typeof retryAfter === "string") {
+        retryAfterMs = parseRetryAfterHeader(retryAfter);
+      }
+    });
+    req.setEncoding("utf8");
+    req.on("data", (chunk) => { respBody += chunk; });
+    req.on("end", () => {
+      let reason: string | undefined;
+      if (respBody) {
+        try {
+          const parsed = JSON.parse(respBody) as { reason?: unknown };
+          reason = typeof parsed.reason === "string" ? parsed.reason : undefined;
+        } catch {}
+      }
+      resolve({ ok: status >= 200 && status < 300, status, reason, apnsId, retryAfterMs });
+    });
+    req.on("error", (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[apns] request error:", message);
+      resolve({ ok: false, status: 0, reason: message });
+    });
+
+    req.end(body);
+    return promise;
   }
 
   private resetSession(): void {
@@ -197,8 +232,9 @@ export class APNs {
     console.log(`[apns] connecting ${this.host}`);
     const session = connect(this.host);
     this.session = session;
-    session.on("error", (err) => {
-      console.error("[apns] session error:", err.message);
+    session.on("error", (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[apns] session error:", message);
       if (this.session === session) {
         this.session = undefined;
       }
@@ -231,6 +267,7 @@ export class APNs {
     return token;
   }
 }
+
 
 function base64url(input: string | Buffer): string {
   const b = typeof input === "string" ? Buffer.from(input, "utf8") : input;
