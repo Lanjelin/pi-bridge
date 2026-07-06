@@ -83,9 +83,52 @@ export class APNs {
    * the caller can prune stale device tokens from its subscription map.
    */
   async send(deviceToken: string, payload: APNsPayload): Promise<SendResult> {
-    const session = this.getSession();
-    const jwt = this.getJwt();
+    let lastResult: SendResult = { ok: false, status: 0, reason: "no-attempt" };
 
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await this.sendOnce(this.getSession(), deviceToken, payload, this.getJwt());
+      if (result.ok) return result;
+      lastResult = result;
+
+      const retryable =
+        result.status === 0 ||
+        result.status >= 500 ||
+        result.status === 401 ||
+        result.reason === "ExpiredProviderToken" ||
+        result.reason === "InvalidProviderToken";
+      if (!retryable || attempt === 1) {
+        return result;
+      }
+
+      if (
+        result.status === 401 ||
+        result.reason === "ExpiredProviderToken" ||
+        result.reason === "InvalidProviderToken"
+      ) {
+        this.cachedJwt = undefined;
+      }
+      this.resetSession();
+    }
+
+    return lastResult;
+  }
+
+  /** Send to many device tokens, log failures, return results in input order. */
+  async sendMany(deviceTokens: Iterable<string>, payload: APNsPayload): Promise<Array<{ token: string; result: SendResult }>> {
+    const tokens = [...deviceTokens];
+    const results = await Promise.all(tokens.map(async (token) => {
+      const result = await this.send(token, payload);
+      if (!result.ok) {
+        console.log(`[apns] send FAILED token=${token.slice(0, 8)}… status=${result.status} reason=${result.reason ?? "?"}`);
+      } else {
+        console.log(`[apns] send ok token=${token.slice(0, 8)}… apnsId=${result.apnsId ?? "?"}`);
+      }
+      return { token, result };
+    }));
+    return results;
+  }
+
+  private sendOnce(session: ClientHttp2Session, deviceToken: string, payload: APNsPayload, jwt: string): Promise<SendResult> {
     const aps: Record<string, unknown> = {
       alert: { title: payload.title, body: payload.body },
       sound: "default",
@@ -137,19 +180,14 @@ export class APNs {
     });
   }
 
-  /** Send to many device tokens, log failures, return results in input order. */
-  async sendMany(deviceTokens: Iterable<string>, payload: APNsPayload): Promise<Array<{ token: string; result: SendResult }>> {
-    const tokens = [...deviceTokens];
-    const results = await Promise.all(tokens.map(async (token) => {
-      const result = await this.send(token, payload);
-      if (!result.ok) {
-        console.log(`[apns] send FAILED token=${token.slice(0, 8)}… status=${result.status} reason=${result.reason ?? "?"}`);
-      } else {
-        console.log(`[apns] send ok token=${token.slice(0, 8)}… apnsId=${result.apnsId ?? "?"}`);
-      }
-      return { token, result };
-    }));
-    return results;
+  private resetSession(): void {
+    const session = this.session;
+    this.session = undefined;
+    if (session && !session.closed && !session.destroyed) {
+      try {
+        session.close();
+      } catch {}
+    }
   }
 
   private getSession(): ClientHttp2Session {
@@ -157,14 +195,21 @@ export class APNs {
       return this.session;
     }
     console.log(`[apns] connecting ${this.host}`);
-    this.session = connect(this.host);
-    this.session.on("error", (err) => {
+    const session = connect(this.host);
+    this.session = session;
+    session.on("error", (err) => {
       console.error("[apns] session error:", err.message);
+      if (this.session === session) {
+        this.session = undefined;
+      }
     });
-    this.session.on("close", () => {
+    session.on("close", () => {
       console.log("[apns] session closed");
+      if (this.session === session) {
+        this.session = undefined;
+      }
     });
-    return this.session;
+    return session;
   }
 
   private getJwt(): string {
