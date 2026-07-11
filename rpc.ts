@@ -175,12 +175,30 @@ export class PiRpc {
     if (!this.proc || this.closed) return;
     console.log(`[${this.tag}] stop() called`);
     this.closed = true;
+    const proc = this.proc;
+    this.proc = null;
     try {
-      this.proc.stdin.end();
+      proc.stdin.end();
     } catch {}
     try {
-      this.proc.kill("SIGTERM");
+      proc.kill("SIGTERM");
     } catch {}
+    await new Promise<void>((resolve) => {
+      const done = () => resolve();
+      const killer = setTimeout(() => {
+        try {
+          proc.kill("SIGKILL");
+        } catch {}
+      }, 2000);
+      proc.once("exit", () => {
+        clearTimeout(killer);
+        done();
+      });
+      proc.once("error", () => {
+        clearTimeout(killer);
+        done();
+      });
+    });
   }
 
   get isAlive(): boolean {

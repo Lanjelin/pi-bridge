@@ -490,6 +490,7 @@ async function shutdown(reason: string): Promise<void> {
   } finally {
     apns?.close();
     server.stop();
+    process.exit(0);
   }
 }
 
